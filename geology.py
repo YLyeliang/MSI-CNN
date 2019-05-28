@@ -16,17 +16,35 @@ path = "/home/yel/data/Aerialgoaf/detection/train"
 #     if cv2.waitKey(1) & 0xFF == ord('q'):
 #         break
 
-files = os.listdir('./images')
-
-
-# def LBP_visual(img):
-
+files = os.listdir('./image_patches')
 
 def areaCal(contour):
     area = 0
     for i in range(len(contour)):
         area += cv2.contourArea(contour[i])
     return area
+
+def watershed(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    ret, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    kernel = np.ones((3, 3), np.uint8)
+    opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
+    # sure background area
+    sure_bg = cv2.dilate(opening, kernel, iterations=3)  # 膨胀
+    # Finding sure foreground area
+
+    dist_transform = cv2.distanceTransform(opening, 2, 5)
+    ret, sure_fg = cv2.threshold(dist_transform, 0.15 * dist_transform.max(), 255, 0)  # 参数改小了，出现不确定区域
+    # Finding unknown region
+    sure_fg = np.uint8(sure_fg)
+    unknown = cv2.subtract(sure_bg, sure_fg)  # 减去前景
+    plt.figure()
+    plt.gray()
+    plt.imshow(sure_fg)
+    plt.show()
+
+
 
 def histogram(img, rho=0.22):
     """Calculate histogram and return the threshold that occupy top rho percent of histogram."""
@@ -57,11 +75,17 @@ def HOG_visual(img_path):
 
 def LBP_visual(img_path):
     img = io.imread(img_path, as_gray=True)
-    cv2.imshow("origin", img)
-    lbp = local_binary_pattern(img, 9, 5.0)
+    img_rgb=io.imread(img_path)
+    lbp = local_binary_pattern(img, 5, 9.0)
     cv2.imshow("lbp", lbp)
+    lbp=np.uint8(lbp)
+    contours,_=cv2.findContours(lbp,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+    contours=remove_contours(contours)
+    rect=minAreaRect(contours)
+    rect=rect_save(rect,1.5)
+    cv2.drawContours(img_rgb,rect,-1,(0,255,0),1)
+    cv2.imshow("origin", img_rgb)
     cv2.waitKey()
-
 
 def thresh_visual(img):
     cv2.imshow("src image", img)
@@ -93,22 +117,15 @@ def sobel(img):
     cv2.imshow("sobel", img_edge)
     cv2.waitKey()
 
-def remove_contours(img):
-    channels = list(img.shape)
-    if len(channels) > 2:
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    thresh_val = histogram(img, 0.2)
-    _, thresh = cv2.threshold(img, thresh_val, 255, cv2.THRESH_BINARY)
-    cv2.imshow("threshold", thresh)
-    contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+def remove_contours(contours,min=30,max=3000):
+    """given a set of contours, preserve those of areas greater than min and smaller than max."""
     contours_keep = []
     for i in range(len(contours)):
         area = cv2.contourArea(contours[i])
-        if area > 30 and area < 3000:
+        if area > min and area < max:
             contours_keep.append(contours[i])
-    # cv2.drawContours(img, contours_keep, -1, (0, 0, 255), 1, )
-    # cv2.imshow("contours", img)
     return contours_keep
+
 
 def rect_save(rect, ratio=1.5, dist=10):
     rect_tmp = []
@@ -131,14 +148,24 @@ def hsv_thresh(img):
     PS:Useless.
     """
     img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+    cv2.imshow("HSV",img_hsv)
     cv2.namedWindow("inRange")
-    cv2.createTrackbar("low", "inRange", 0, 255, lambda x: None)
-    cv2.createTrackbar("up", "inRange", 0, 255, lambda x: None)
+    cv2.createTrackbar("lowH", "inRange", 0, 255, lambda x: None)
+    cv2.createTrackbar("lowS", "inRange", 0, 255, lambda x: None)
+    cv2.createTrackbar("lowV", "inRange", 0, 255, lambda x: None)
+    cv2.createTrackbar("upH", "inRange", 0, 255, lambda x: None)
+    cv2.createTrackbar("upS", "inRange", 0, 255, lambda x: None)
+    cv2.createTrackbar("upV", "inRange", 0, 255, lambda x: None)
+
     while True:
-        low = cv2.getTrackbarPos("low", "inRange")
-        up = cv2.getTrackbarPos("up", "inRange")
-        lower = np.array([low, low, low])
-        upper = np.array([up, up, up])
+        lowH = cv2.getTrackbarPos("lowH", "inRange")
+        upH = cv2.getTrackbarPos("upH", "inRange")
+        lowS = cv2.getTrackbarPos("lowS", "inRange")
+        upS = cv2.getTrackbarPos("upS", "inRange")
+        lowV = cv2.getTrackbarPos("lowV", "inRange")
+        upV = cv2.getTrackbarPos("upV", "inRange")
+        lower = np.array([lowH, lowS, lowV])
+        upper = np.array([upH, upS, upV])
         thresh = cv2.inRange(img_hsv, lower, upper)
         cv2.imshow("inRange", thresh)
         k = cv2.waitKey(1) & 0xFF
@@ -184,33 +211,44 @@ def kmeans(img):
     # print(areaCal(contours))
 
 def minAreaRect(contours):
+    """given a set of contours, return minArea Rectangles"""
     rect_keep = []
     for i in contours:
         rect = cv2.minAreaRect(i)
         rect_keep.append(rect)
     return rect_keep
 
+def findContours(img,mode=cv2.RETR_TREE,method=cv2.CHAIN_APPROX_SIMPLE):
+    return cv2.findContours(img,mode,method)
+
+def canny(img):
+    cv2.namedWindow("canny")
+    cv2.createTrackbar("thresh1","canny",0,255,lambda x:None)
+    cv2.createTrackbar("thresh2","canny",0,255,lambda x:None)
+    while True:
+        thresh1=cv2.getTrackbarPos("thresh1","canny")
+        thresh2=cv2.getTrackbarPos("thresh2","canny")
+        Canny=cv2.Canny(img,thresh1,thresh2)
+        cv2.imshow("canny",Canny)
+        k=cv2.waitKey(1) & 0xff
+        if k==ord("q"):
+            break
+
+
 for src in files:
-    path = os.path.join('./images', src)
-    img = cv2.imread(os.path.join('./images', src))
+    img_path = os.path.join('./image_patches', src)
+    img = cv2.imread(img_path)
+    img_gray=cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
     cv2.imshow("srouce", img)
-    kmeans(img)
-    # remove_contours(img)
+    canny(img_gray)
+    # img_hsv=cv2.cvtColor(img,cv2.COLOR_BGR2HSV)
+    # cv2.imshow("HSV",img_hsv)
+    # kmeans(img)
     # hsv_thresh(img)
-    img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    contours_keep = remove_contours(img)
-    rect_keep = []
-    for i in contours_keep:
-        rect = cv2.minAreaRect(i)
-        rect_keep.append(rect)
-    # rect_save(rect_keep)
-    box_keep = []
-    for i in rect_keep:
-        center, size, theta = i
-        w, h = size
-        if w / h > 2 or w / h < 0.5:
-            box = np.int0(cv2.boxPoints(i))
-            box_keep.append(box)
+    # contours,hierachy=findContours(img)
+    # contours_keep = remove_contours(contours)
+    # rect=minAreaRect(contours_keep)
+    # boxes=rect_save(rect)
     # dst=cv2.equalizeHist(img)       #均衡化
     # th_val=histogram(dst)
     # _,thresh=cv2.threshold(dst,th_val,255,cv2.THRESH_BINARY)
@@ -219,12 +257,14 @@ for src in files:
     # cv2.imshow("equaHist",dst)
     # cv2.imshow("contours",img)
     # cv2.drawContours(img, contours_keep, -1, (0, 0, 255), 1)
-    cv2.drawContours(img, box_keep, -1, (0, 255, 0), 1)
+    # cv2.drawContours(img, box_keep, -1, (0, 255, 0), 1)
     # cv2.imshow("contours", img)
-    cv2.waitKey()
     # thresh_visual(img)
     # HOG_visual(path)
     # sobel(img)
-    # LBP_visual(path)
+
+    # LBP_visual(img_path)
+
     # thresh_adap=cv2.adaptiveThreshold(img_gray,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY,13,2)
     # cv2.imshow("threshold_adap",thresh_adap)
+    cv2.waitKey()
