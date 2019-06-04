@@ -27,10 +27,25 @@ def minAreaRect(contours):
     return rect_keep, area
 
 
+def findContours(img, mode=cv2.RETR_EXTERNAL, method=cv2.CHAIN_APPROX_SIMPLE, get_area=False):
+    if get_area:
+        contours, _ = cv2.findContours(img, mode, method)
+        area = []
+        for i in contours:
+            area_ = cv2.contourArea(i)
+            area += [area_]
+        return contours, _, area
+
+    else:
+        return cv2.findContours(img, mode, method)
+
+
 def find_orientation(img, contour):
     # 对轮廓拟合一条直线
     rows, cols = img.shape[:2]
     [vx, vy, x, y] = cv2.fitLine(contour, cv2.DIST_L2, 0, 0.01, 0.01)
+    (x2, y2), (MA, ma), angle = cv2.fitEllipse(contour)
+
     # x,y轮廓的中心点，为拟合直线上的一点，vy/vx为该直线的斜率
     # y = k*(x-x0)+y0
     # lefty = int((-x * vy / vx) + y)
@@ -39,6 +54,10 @@ def find_orientation(img, contour):
     # cv2.imshow("source", img)
     # cv2.waitKey()
     return x, y, vy / vx
+
+
+def find_orientationv2(img, contours):
+    """讲轮廓拟合成一个椭圆，根据椭圆算出长轴直线，即轮廓走向。"""
 
 
 def get_extreme_points(cnt):
@@ -80,9 +99,37 @@ def get_dist(point, line):
     dist = abs(A * point_x + B * point_y + C) / math.sqrt(A ** 2 + B ** 2)
     return dist
 
+def get_distv2(cnt_left,line):
+    x,y,k = line
+    A = k
+    B = -1
+    C = y - k * x
+    distance=np.ones((len(cnt_left)))
+    for i in range(len(cnt_left)):
+        min_dist=[]
+        for j in cnt_left[i]:
+            j=np.squeeze(j)
+            point_x,point_y = j
+            dist = abs(A * point_x + B * point_y + C) / math.sqrt(A ** 2 + B ** 2)
+            min_dist+=[dist]
+        distance[i]=np.min(min_dist)
+    return distance
+
+
 
 def get_angle_diff(rect, rect_left):
-    angle_diff = abs(rect_left - rect)
+    w, h = list(rect[1])
+    ratio = w / h
+    if ratio > 1:
+        angle = abs(rect[2])
+    else:
+        angle = 90 - abs(rect[2])
+    size = np.array(list(rect_left[:, 0]))
+    w_left, h_left = size[:, 0], size[:, 1]
+    ratio_left = w_left / h_left
+    angle_left = list(rect_left[:, 2])
+    angle_left = np.where(ratio_left > 1, np.abs(angle_left), 90 - np.abs(angle_left))
+    angle_diff = abs(angle_left - angle)
     return angle_diff
 
 
@@ -91,20 +138,20 @@ def get_contour_point(cntA, line):
     x, y, k = line
 
     cntA = np.squeeze(cntA)
-    coord_x,coord_y=cntA[:,0],cntA[:,1]
+    coord_x, coord_y = cntA[:, 0], cntA[:, 1]
     match = abs(k * coord_x - coord_y + y - k * x)
-    index=np.where(match<1.5)
-    result= cntA[index]
+    index = np.where(match < 1.5)
+    result = cntA[index]
     return result
 
-def get_point_with_small_dist(cnt,point):
-    cnt=np.squeeze(cnt)
-    dist=cnt-point
-    l2_dist=np.linalg.norm(dist,axis=1)
-    arg=np.argmin(l2_dist)
-    result=cnt[arg]
-    return result
 
+def get_point_with_small_dist(cnt, point):
+    cnt = np.squeeze(cnt)
+    dist = cnt - point
+    l2_dist = np.linalg.norm(dist, axis=1)
+    arg = np.argmin(l2_dist)
+    result = cnt[arg]
+    return result
 
 
 def remove_small_region(img, contours, small_region=10):
@@ -123,41 +170,103 @@ def remove_small_region(img, contours, small_region=10):
             del area[i]
             continue
         i += 1
-
-    cv2.imshow("img",img)
-    cv2.waitKey()
+    # cv2.imshow("img",img)
+    # cv2.waitKey()
 
     return img, contours, area
 
-def connect_cnt(img,contours,area,angle_cond=10):
-    rect, _ = minAreaRect(contours)
 
+def connect_cnt(img, contours, area, angle_cond=20):
+    """给定图像和轮廓,计算轮廓面积并按降序排序，计算大面积裂缝的走向，并计算其走向直线与其他裂缝中心店的距离，满足走向和距离差值
+    条件则进行连接"""
+    rect, _ = minAreaRect(contours)
     # 获取裂缝轮廓中心点以及走向在图像上的角度,并找到最大值排序索引.
-    centers = []
-    angles = []
     area = np.array(area)
     rect = np.array(rect)
-    for i in rect:
-        centers += [i[0]]
-        angles += [i[2]]
-    centers = np.array(centers)
-    angles = np.array(angles)
+    centers = np.array(list(rect[:, 0]))
+    sizes = np.array(list(rect[:, 1]))
+    angles = np.array(list(rect[:, 2]))
     index = np.argsort(area)[::-1]
     # 按轮廓面积排序
     contours = np.array(contours)
     contours = contours[index]
+    rect = rect[index]
     centers = centers[index]
+    sizes = sizes[index]
     angles = angles[index]
+    area = area[index]
     # debug
     # cv2.drawContours(img,contours[])
+    terminate = False
     for i in range(len(rect)):
+        # 如果遍历所有轮廓，没有满足条件的，则终止
+        if i == len(rect) - 1:
+            terminate = True
+            return img, terminate
         x, y, k = find_orientation(img, contours[i])  # 找出轮廓的走向,并拟合线性方程
-        dist = get_dist(centers[i + 1:], (x, y, k))  # 计算其他轮廓中心点距离当前轮廓走向直线的距离
-        angle_diff = get_angle_diff(angles[i], angles[i + 1:])  # 计算其他轮廓走向与当前轮廓的走向差值
+        dist = get_dist(centers[i + 1:], (x, y, k))  # 计算待连接轮廓中心点距离当前轮廓走向直线的距离
+        angle_diff = get_angle_diff(rect[i], rect[i + 1:])  # 计算待连接轮廓走向与当前轮廓的走向差值
         for j in range(len(dist)):
             # 满足条件的轮廓即为我们要进行连接的轮廓
             if dist[j] < 10 and angle_diff[j] < angle_cond:
-                points = get_contour_point(contours[i], (x, y, k))  # 计算轮廓上距离走向直线最近的点
+                points = get_contour_point(contours[i], (x, y, k))  # 计算当前轮廓上距离走向直线最近的点
+                cnt_left = contours[i + j + 1]
+                wide=math.floor(np.minimum(sizes[i][0],sizes[i][1])/2)
+                if wide > 12 :
+                    wide=10
+                # 计算找到的点距连接轮廓的距离
+                dist_dot_cnt = []
+                for k in range(len(points)):
+                    dist_dot_cnt_ = cv2.pointPolygonTest(cnt_left, tuple(points[k]), True)  # 负数则点在外面，正数在轮廓里面
+                    dist_dot_cnt += [dist_dot_cnt_]
+                dist_dot_cnt = abs(np.array(dist_dot_cnt))
+                arg = np.argmin(dist_dot_cnt)
+                point = points[arg]
+                point_left = get_point_with_small_dist(cnt_left, point)  # 找到待连接轮廓上距当前轮廓最近的点
+                cv2.line(img, tuple(point), tuple(point_left), color=(38), thickness=wide)
+                # 连接轮廓之后重新寻找轮廓再次连接
+                cv2.imshow("img", img)
+                cv2.waitKey()
+                return img, terminate
+
+
+def connect_cntv2(img, contours, area, angle_cond=20):
+    """给定图像和轮廓,面积降序排序,计算大轮廓的走向，并沿走向方向计算其与待连接轮廓的距离，满足距离条件以及走向条件，
+    """
+    rect, _ = minAreaRect(contours)
+    # 获取裂缝轮廓中心点以及走向在图像上的角度,并找到最大值排序索引.
+    area = np.array(area)
+    rect = np.array(rect)
+    centers = np.array(list(rect[:, 0]))
+    sizes = np.array(list(rect[:, 1]))
+    angles = np.array(list(rect[:, 2]))
+    index = np.argsort(area)[::-1]
+    # 按轮廓面积排序
+    contours = np.array(contours)
+    contours = contours[index]
+    rect = rect[index]
+    centers = centers[index]
+    sizes = sizes[index]
+    angles = angles[index]
+    area = area[index]
+    # debug
+    # cv2.drawContours(img,contours[])
+    terminate = False
+    for i in range(len(rect)):
+        # 如果遍历所有轮廓，没有满足条件的，则终止
+        if i == len(rect) - 1:
+            terminate = True
+            return img, terminate
+        x, y, k = find_orientation(img, contours[i])  # 找出轮廓的走向,并拟合线性方程
+        dist = get_distv2(contours[i + 1:], (x, y, k))  # 计算待连接轮廓中心点距离当前轮廓走向直线的距离
+        angle_diff = get_angle_diff(rect[i], rect[i + 1:])  # 计算待连接轮廓走向与当前轮廓的走向差值
+        for j in range(len(dist)):
+            # 满足条件的轮廓即为我们要进行连接的轮廓
+            if dist[j] < 8 and angle_diff[j] < angle_cond:
+                points = get_contour_point(contours[i], (x, y, k))  # 计算当前轮廓上距离走向直线最近的点
+                wide=math.floor(np.minimum(sizes[i][0],sizes[i][1])/2)
+                if wide >12:
+                    wide =10
                 cnt_left = contours[i + j + 1]
                 # 计算找到的点距连接轮廓的距离
                 dist_dot_cnt = []
@@ -167,62 +276,46 @@ def connect_cnt(img,contours,area,angle_cond=10):
                 dist_dot_cnt = abs(np.array(dist_dot_cnt))
                 arg = np.argmin(dist_dot_cnt)
                 point = points[arg]
-                point_left = get_point_with_small_dist(cnt_left, point)
+                point_left = get_point_with_small_dist(cnt_left, point)  # 找到待连接轮廓上距当前轮廓最近的点
                 cv2.line(img, tuple(point), tuple(point_left), color=(38), thickness=8)
                 # 连接轮廓之后重新寻找轮廓再次连接
-                # cv2.imshow("img", img)
-                # cv2.waitKey()
-                break
+                cv2.imshow("img", img)
+                cv2.waitKey()
+                return img, terminate
 
-def check_region(img, contours, angle_cond=10):
+
+def connect_contour(img, dist_cond=10, angle_cond=10):
+    contours, _ = findContours(img)
     img, contours, area = remove_small_region(img, contours)
+    img, term = connect_cnt(img, contours, area)
+    while True:
+        contours, _ = findContours(img)
+        img, contours, area = remove_small_region(img, contours)
+        img, term = connect_cnt(img, contours, area)
+        if term:
+            break
+    cv2.imshow("result", img)
+    cv2.waitKey()
 
-    rect, _ = minAreaRect(contours)
 
-    # 获取裂缝轮廓中心点以及走向在图像上的角度,并找到最大值排序索引.
-    centers = []
-    angles = []
-    area = np.array(area)
-    rect = np.array(rect)
-    for i in rect:
-        centers += [i[0]]
-        angles += [i[2]]
-    centers = np.array(centers)
-    angles = np.array(angles)
-    index = np.argsort(area)[::-1]
-    # 按轮廓面积排序
-    contours = np.array(contours)
-    contours = contours[index]
-    centers = centers[index]
-    angles = angles[index]
-    # debug
-    # cv2.drawContours(img,contours[])
-    tmp = area[index[1:]]
-    for i in range(len(rect)):
-        x, y, k = find_orientation(img, contours[i])  # 找出轮廓的走向
-        dist = get_dist(centers[i + 1:], (x, y, k))  # 计算其他轮廓中心点距离当前轮廓走向直线的距离
-        angle_diff = get_angle_diff(angles[i], angles[i + 1:])  # 计算其他轮廓走向与当前轮廓的走向差值
-        for j in range(len(dist)):
-            #满足条件的轮廓即为我们要进行连接的轮廓
-            if dist[j] < 10 and angle_diff[j] < angle_cond:
-                points=get_contour_point(contours[i], (x, y, k))    #计算轮廓上距离走向直线最近的点
-                cnt_left=contours[i+j+1]
-                #计算找到的点距连接轮廓的距离
-                dist_dot_cnt=[]
-                for k in range(len(points)):
-                    dist_dot_cnt_=cv2.pointPolygonTest(cnt_left,tuple(points[k]),True)  #负数则点在外面，正数在轮廓里面
-                    dist_dot_cnt+=[dist_dot_cnt_]
-                dist_dot_cnt=abs(np.array(dist_dot_cnt))
-                arg=np.argmin(dist_dot_cnt)
-                point=points[arg]
-                point_left=get_point_with_small_dist(cnt_left,point)
-                cv2.line(img,tuple(point),tuple(point_left),color=(38),thickness=8)
-                #连接轮廓之后重新寻找轮廓再次连接
-                # cv2.imshow("img", img)
-                # cv2.waitKey()
-                break
+def connect_contourv2(img, dist_cond=10, angle_cond=10):
+    contours, _ = findContours(img)
+    img, contours, area = remove_small_region(img, contours)
+    img,term = connect_cntv2(img,contours,area)
+    while True:
+        contours, _ = findContours(img)
+        img, contours, area = remove_small_region(img, contours)
+        img, term = connect_cntv2(img, contours, area)
+        if term:
+            break
+    cv2.imshow("result", img)
+    cv2.waitKey()
 
-        cnt = contours[i + 1:]
+
+def postprocess(img, dist_cond=10, angle_cond=10):
+    contours, _ = findContours(img, get_area=False)
+    img, contours, area = remove_small_region(img, contours)
+    img = connect_cnt(img, contours, area)
 
 
 def line_step(img, x, y, k, point, cnt_left, width=5, left=True):
@@ -291,33 +384,21 @@ def connect_region(img, contours):
         contour = contours[i]
         contour = np.squeeze(contour)
 
+def test_run():
+    # img=Image.open(img_path)
+    # img_array=np.array(img)
+    img_cv = cv2.imread(img_path, 0)
 
-# img=Image.open(img_path)
-# img_array=np.array(img)
-img_cv = cv2.imread(img_path, 0)
-
-contours, _ = cv2.findContours(img_cv, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-check_region(img_cv, contours)
-connect_region(img_cv, contours)
-# canny=cv2.Canny(img_cv,0,100)
-# cv2.imshow("canny",canny)
-area = []
-rect = []
-for i in contours:
-    rect_ = cv2.minAreaRect(i)
-    i_ = np.squeeze(i)
-
-    rect.append(rect_)
-    area_tmp = cv2.contourArea(i)
-    area.append(area_tmp)
-
-index = np.argsort(area)[::-1]
-box_keep = []
-for i in rect:
-    box = cv2.boxPoints(i)
-    box = np.int0(box)
-    box_keep.append(box)
-
-cv2.drawContours(img_cv, box_keep, -1, (255, 0, 0), 1)
-cv2.imshow("img", img_cv)
-cv2.waitKey()
+    # contours, _ = cv2.findContours(img_cv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    connect_contourv2(img_cv)
+    # connect_region(img_cv, contours)
+    # canny=cv2.Canny(img_cv,0,100)
+    # cv2.imshow("canny",canny)
+    # for i in rect:
+    #     box = cv2.boxPoints(i)
+    #     box = np.int0(box)
+    #     box_keep.append(box)
+    #
+    # cv2.drawContours(img_cv, box_keep, -1, (255, 0, 0), 1)
+    cv2.imshow("img", img_cv)
+    cv2.waitKey()
